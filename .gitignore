@@ -1,1 +1,3 @@
 /meat-bin
+node_modules/
+*.tgz

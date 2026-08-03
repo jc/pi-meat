@@ -21,3 +21,25 @@ It takes git-looking parameters to pick commits to review.
 It takes a while to process a commit for reading.
 So I suggest you have an agent build `meat` into your devtools so that
 it pre-processes it.
+
+## pi extension
+
+This repo is one of those devtools. It is a pi package: the agent gets a
+`meat` tool, and you get a `/meat` command.
+
+```
+pi install npm:pi-meat
+```
+
+The tool takes a commit, a range, `-staged`, the working tree, or a diff
+from the agent's context, and returns the reading diff. `/meat [target]`
+(default `HEAD`) drops the reading diff into the session as context, so
+the agent works from the meat instead of the raw diff.
+
+If `meat` is not on your `PATH` the extension builds it once from the Go
+source bundled in the package (needs Go installed) and caches the binary
+in `~/.cache/pi-meat`. Set `MEAT_BIN` to use a specific binary.
+
+Keys come from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` (and `MEAT_MODEL`,
+`MEAT_CACHE`) as usual. If neither key is in the environment, the
+extension borrows an API key from pi's own model registry.
