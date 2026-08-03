@@ -1,0 +1,117 @@
+diff --git a/src/transformers/models/deepseek_v3/modeling_deepseek_v3.py b/src/transformers/models/deepseek_v3/modeling_deepseek_v3.py
+index ab998cc99c..fe3acd9aed 100644
+--- a/src/transformers/models/deepseek_v3/modeling_deepseek_v3.py
++++ b/src/transformers/models/deepseek_v3/modeling_deepseek_v3.py
+@@ -227,7 +227,7 @@ class DeepseekV3MoE(nn.Module):
+             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+             .reshape(-1, self.n_routed_experts)
+         )
+-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
++        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+         topk_weights = router_logits.gather(1, topk_indices)
+         if self.norm_topk_prob:
+diff --git a/src/transformers/models/deepseek_v3/modular_deepseek_v3.py b/src/transformers/models/deepseek_v3/modular_deepseek_v3.py
+index 3c62a564a3..2bf7d347e8 100644
+--- a/src/transformers/models/deepseek_v3/modular_deepseek_v3.py
++++ b/src/transformers/models/deepseek_v3/modular_deepseek_v3.py
+@@ -146,7 +146,7 @@ class DeepseekV3MoE(nn.Module):
+             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+             .reshape(-1, self.n_routed_experts)
+         )
+-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
++        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+         topk_weights = router_logits.gather(1, topk_indices)
+         if self.norm_topk_prob:
+diff --git a/src/transformers/models/exaone_moe/modeling_exaone_moe.py b/src/transformers/models/exaone_moe/modeling_exaone_moe.py
+index 2836a3c224..a7f80fc979 100644
+--- a/src/transformers/models/exaone_moe/modeling_exaone_moe.py
++++ b/src/transformers/models/exaone_moe/modeling_exaone_moe.py
+@@ -313,7 +313,7 @@ class ExaoneMoeSparseMoEBlock(nn.Module):
+             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+             .reshape(-1, self.n_routed_experts)
+         )
+-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
++        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+         topk_weights = router_logits.gather(1, topk_indices)
+         if self.norm_topk_prob:
+diff --git a/src/transformers/models/glm4_moe/modeling_glm4_moe.py b/src/transformers/models/glm4_moe/modeling_glm4_moe.py
+index 1bc20c8322..cc5a564ab8 100644
+--- a/src/transformers/models/glm4_moe/modeling_glm4_moe.py
++++ b/src/transformers/models/glm4_moe/modeling_glm4_moe.py
+@@ -402,7 +402,7 @@ class Glm4MoeMoE(nn.Module):
+             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+             .reshape(-1, self.n_routed_experts)
+         )
+-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
++        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+         topk_weights = router_logits.gather(1, topk_indices)
+         if self.norm_topk_prob:
+diff --git a/src/transformers/models/glm4_moe_lite/modeling_glm4_moe_lite.py b/src/transformers/models/glm4_moe_lite/modeling_glm4_moe_lite.py
+index d59fd2ab99..0b8ccc8657 100644
+--- a/src/transformers/models/glm4_moe_lite/modeling_glm4_moe_lite.py
++++ b/src/transformers/models/glm4_moe_lite/modeling_glm4_moe_lite.py
+@@ -477,7 +477,7 @@ class Glm4MoeLiteMoE(nn.Module):
+             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+             .reshape(-1, self.n_routed_experts)
+         )
+-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
++        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+         topk_weights = router_logits.gather(1, topk_indices)
+         if self.norm_topk_prob:
+diff --git a/src/transformers/models/glm4v_moe/modeling_glm4v_moe.py b/src/transformers/models/glm4v_moe/modeling_glm4v_moe.py
+index b3f5118a3d..3bf3dc157d 100644
+--- a/src/transformers/models/glm4v_moe/modeling_glm4v_moe.py
++++ b/src/transformers/models/glm4v_moe/modeling_glm4v_moe.py
+@@ -292,7 +292,7 @@ class Glm4vMoeTextMoE(nn.Module):
+             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+             .reshape(-1, self.n_routed_experts)
+         )
+-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
++        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+         topk_weights = router_logits.gather(1, topk_indices)
+         if self.norm_topk_prob:
+diff --git a/src/transformers/models/glm_moe_dsa/modeling_glm_moe_dsa.py b/src/transformers/models/glm_moe_dsa/modeling_glm_moe_dsa.py
+index 950deba080..4fa6930ea5 100644
+--- a/src/transformers/models/glm_moe_dsa/modeling_glm_moe_dsa.py
++++ b/src/transformers/models/glm_moe_dsa/modeling_glm_moe_dsa.py
+@@ -560,7 +560,7 @@ class GlmMoeDsaMoE(nn.Module):
+             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+             .reshape(-1, self.n_routed_experts)
+         )
+-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
++        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+         topk_weights = router_logits.gather(1, topk_indices)
+         if self.norm_topk_prob:
+diff --git a/src/transformers/models/nemotron_h/modeling_nemotron_h.py b/src/transformers/models/nemotron_h/modeling_nemotron_h.py
+index a32c349ce1..4c7a480c6b 100644
+--- a/src/transformers/models/nemotron_h/modeling_nemotron_h.py
++++ b/src/transformers/models/nemotron_h/modeling_nemotron_h.py
+@@ -719,7 +719,7 @@ class NemotronHMoE(nn.Module):
+             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+             .reshape(-1, self.n_routed_experts)
+         )
+-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
++        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+         topk_weights = router_logits.gather(1, topk_indices)
+         if self.norm_topk_prob:
+diff --git a/src/transformers/models/solar_open/modeling_solar_open.py b/src/transformers/models/solar_open/modeling_solar_open.py
+index dfa3029245..0eb50021ec 100644
+--- a/src/transformers/models/solar_open/modeling_solar_open.py
++++ b/src/transformers/models/solar_open/modeling_solar_open.py
+@@ -200,7 +200,7 @@ class SolarOpenMoE(nn.Module):
+             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+             .reshape(-1, self.n_routed_experts)
+         )
+-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
++        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
+         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+         topk_weights = router_logits.gather(1, topk_indices)
+         if self.norm_topk_prob:

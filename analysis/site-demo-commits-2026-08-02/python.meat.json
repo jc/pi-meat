@@ -1,0 +1,7 @@
+{
+  "smart_diff": "diff --git a/src/transformers/models/deepseek_v3/modular_deepseek_v3.py b/src/transformers/models/deepseek_v3/modular_deepseek_v3.py\nindex 3c62a564a3..2bf7d347e8 100644\n--- a/src/transformers/models/deepseek_v3/modular_deepseek_v3.py\n+++ b/src/transformers/models/deepseek_v3/modular_deepseek_v3.py\n@@ -146,7 +146,7 @@ class DeepseekV3MoE(nn.Module):\n             .expand(-1, self.n_group, self.n_routed_experts // self.n_group)\n             .reshape(-1, self.n_routed_experts)\n         )\n-        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)\n+        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), float(\"-inf\"))\n         topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]\n",
+  "summary": "Exclude masked experts from MoE top-k routing by assigning them negative infinity, with dependent model files regenerated.",
+  "input_tokens": 49861,
+  "output_tokens": 979,
+  "elision": "kept 2/18 changed lines in 1/9 files"
+}

@@ -13,7 +13,9 @@
 // carries meaning. Meat applies the plan to the immutable input itself, so the
 // model never authors the displayed diff wholesale. The agent has read-only
 // access to the surrounding source tree so it can use clues to decide what is
-// load-bearing.
+// load-bearing. A diff too large for one agent context is split at file and
+// hunk boundaries into independently valid chunks, abridged chunk by chunk,
+// and merged (see chunk.go).
 //
 // The package is provider-agnostic: callers supply a Model. The command
 // meat.dev ships built-in OpenAI Responses and Anthropic Messages models;
@@ -33,24 +35,30 @@ import (
 // allows a good deal of tool use while still terminating a runaway loop.
 const defaultMaxTurns = 24
 
-// defaultBudget bounds total wall-clock time for one Abridge call so a stuck
-// run can't hang forever.
+// defaultBudget bounds total wall-clock time for one agent run (the whole
+// diff, or one chunk of a split diff) so a stuck run can't hang forever.
 const defaultBudget = 4 * time.Minute
 
 // abridgeBudget is a variable so deadline/fallback behavior can be tested
 // without waiting for the production budget.
 var abridgeBudget = defaultBudget
 
-// maxDiffBytes bounds both the raw diff and its numbered form accepted in one
-// Abridge call. The numbered whole diff is sent up front (and re-sent every
-// turn), so a huge input would blow the context window — better to refuse with
-// advice than fail with a raw API error deep into the run.
+// maxDiffBytes bounds both the raw diff and its numbered form sent to one
+// agent run. The numbered whole diff is sent up front (and re-sent every
+// turn), so a bigger input would blow the context window. Diffs over this
+// limit are split into chunks at structural boundaries (see chunk.go) and
+// abridged one chunk per run.
 const maxDiffBytes = 400 << 10 // ~400 KB ≈ 100k+ tokens of code
+
+// singleRunDiffBytes is a variable so chunked-abridging tests can exercise
+// real splits with small fixtures instead of 400KB inputs.
+var singleRunDiffBytes = maxDiffBytes
 
 // Request is a whole-diff abridgement request. The diff may span many files;
 // abridging the whole change at once (rather than file by file) lets the model
 // reason across files and gives it maximum context to decide what is
-// load-bearing.
+// load-bearing. A diff too large for one model context is split at structural
+// boundaries and abridged chunk by chunk (see chunk.go).
 type Request struct {
 	// RepoRoot is the directory the read-only tools are confined to. If empty,
 	// the tools are disabled (the model abridges from the diff text alone).
@@ -61,9 +69,24 @@ type Request struct {
 	// MaxTurns overrides defaultMaxTurns when > 0.
 	MaxTurns int
 	// Progress, when non-nil, receives short human-readable status updates as
-	// the run proceeds (one per model turn and per tool call). Callers use it
-	// for interactive feedback; it must not block.
+	// the run proceeds (one per model turn and per tool call; chunked runs
+	// prefix each update with its chunk). Callers use it for interactive
+	// feedback; it must not block.
 	Progress func(msg string)
+}
+
+// runOptions carries chunk-internal state for one agent run, kept out of the
+// exported Request so embedders' struct literals stay source-compatible.
+type runOptions struct {
+	// chunkRun marks a per-chunk agent run of a split diff. Move detection is
+	// a whole-diff property (a block appearing three times globally is
+	// deliberately ambiguous, but a chunk seeing two occurrences would invent
+	// a move), so chunk runs never detect moves themselves; chunkMoves carries
+	// the whole-diff moves whose sides both landed in this chunk, mapped to
+	// chunk coordinates, and those are hinted and enforced instead. A move
+	// split across chunks cannot be enforced — a documented cost of chunking.
+	chunkRun   bool
+	chunkMoves []detectedMove
 }
 
 // Result is the abridged reading diff. The json tags give embedders and the
@@ -81,8 +104,14 @@ type Result struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
-// Abridge runs the agent loop that turns req.UnifiedDiff into a reading diff,
-// using the supplied Model for all generation.
+// noToolCallNudge is sent when the model produced text but no tool call. Like
+// every model-visible string, it describes only what the model must do next.
+const noToolCallNudge = "Call preview_plan or submit with a complete remove/replace/fold plan against the numbered ORIGINAL diff. Prefer removals and fixed multiline folds; use replace only for a local single-line elision. If nothing meaningful changed, remove every original line."
+
+// Abridge turns req.UnifiedDiff into a reading diff, using the supplied Model
+// for all generation. A diff that fits one agent run is abridged whole; a
+// larger diff (up to maxTotalDiffBytes) is split at structural boundaries and
+// abridged chunk by chunk, and the per-chunk results are merged.
 func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	if model == nil {
 		return nil, fmt.Errorf("meat: nil model")
@@ -90,16 +119,22 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	if strings.TrimSpace(req.UnifiedDiff) == "" {
 		return &Result{Summary: "No changes."}, nil
 	}
-	if len(req.UnifiedDiff) > maxDiffBytes {
-		return nil, fmt.Errorf("meat: diff is %dKB, over the %dKB limit — try a narrower range (a single commit, or per-file with `git diff -- <path> | meat`)", len(req.UnifiedDiff)>>10, maxDiffBytes>>10)
-	}
-	numbered := numberedDiff(req.UnifiedDiff)
-	if len(numbered) > maxDiffBytes {
-		return nil, fmt.Errorf("meat: numbered diff expands to %dKB, over the %dKB context limit — try a narrower range", len(numbered)>>10, maxDiffBytes>>10)
+	if len(req.UnifiedDiff) > maxTotalDiffBytes {
+		return nil, fmt.Errorf("meat: diff is %dMB, over the %dMB limit — try a narrower range (a single commit, or per-file with `git diff -- <path> | meat`)", len(req.UnifiedDiff)>>20, maxTotalDiffBytes>>20)
 	}
 	if err := validateSupportedDiff(req.UnifiedDiff); err != nil {
 		return nil, fmt.Errorf("meat: %w", err)
 	}
+	if !fitsSingleRun(req.UnifiedDiff, singleRunDiffBytes) {
+		return abridgeChunked(ctx, model, req)
+	}
+	return abridgeOne(ctx, model, req, runOptions{})
+}
+
+// abridgeOne runs the agent loop on one single-run-sized diff: the whole
+// input when it fits, or one chunk of a split diff.
+func abridgeOne(ctx context.Context, model Model, req Request, opts runOptions) (*Result, error) {
+	numbered := numberedDiff(req.UnifiedDiff)
 
 	maxTurns := req.MaxTurns
 	if maxTurns <= 0 {
@@ -110,12 +145,12 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, abridgeBudget)
 	defer cancel()
 
-	tb := &toolbox{root: req.RepoRoot, rawDiff: req.UnifiedDiff}
+	tb := &toolbox{root: req.RepoRoot, rawDiff: req.UnifiedDiff, noMoves: opts.chunkRun, moves: opts.chunkMoves}
 	tools := tb.tools()
 
 	messages := []Message{{
 		Role:    RoleUser,
-		Content: []Block{textBlock(buildUserPrompt(req, numbered))},
+		Content: []Block{textBlock(buildUserPrompt(req, opts, numbered))},
 	}}
 
 	progress := req.Progress
@@ -182,7 +217,7 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 			// submitting; the loop bound prevents this from running away.
 			messages = append(messages, Message{
 				Role:    RoleUser,
-				Content: []Block{textBlock("Call preview_plan or submit with a complete remove/replace/fold plan against the numbered ORIGINAL diff. Prefer removals and fixed multiline folds; use replace only for a local single-line elision. If nothing meaningful changed, remove every original line.")},
+				Content: []Block{textBlock(noToolCallNudge)},
 			})
 			continue
 		}
@@ -200,19 +235,35 @@ func Abridge(ctx context.Context, model Model, req Request) (*Result, error) {
 	return nil, fmt.Errorf("meat: agent did not submit within %d turns", maxTurns)
 }
 
-func buildUserPrompt(req Request, numbered string) string {
+// The static model-visible user-prompt fragments. Every string the model can
+// see that is not derived from the input diff lives in a named const so
+// promptSurface can hash the complete frozen surface.
+const (
+	userPromptIntro    = "Abridge the following unified diff into a reading diff by submitting a complete remove/replace/fold plan against the numbered original lines. Meat applies your plan to the original diff; you do not write the resulting diff yourself. Coordinates are 1-based and always refer to the original numbering. The `N|` gutter is display-only and is not part of a line's source text. Use preview_plan to inspect sizeable drafts before submit.\n"
+	userPromptImports  = "Imports/includes/requires/use declarations are removed automatically, including multiline blocks and recognized imports inside embedded source strings. They may appear in the numbered input but never in a preview or result. Do not spend edit coordinates on them, never fold across them into behavioral rows, and do not mention them in the summary.\n"
+	userPromptMoves    = "Meat detected exact source-evidenced moves across hunks/files: %s. Give both sides of each pair identical keep/remove/fold/replace treatment, including matching fold boundaries and equivalent local elisions; automatically removed rows need none. Asymmetric plans are rejected.\n"
+	userPromptTools    = "Use read_file/grep on the surrounding source only when it changes your judgment about what is load-bearing (or whether a file is generated), then preview or submit.\n"
+	userPromptNoTools  = "Judge from the diff text alone, then preview or submit.\n"
+	userPromptProtocol = "Prefer removing whole lines or ranges. Use fold to replace two or more contiguous same-polarity hunk lines with one machine-generated, indentation-preserving `...` row. Use replace only to elide part of one source line; `new` must match all of `old` with every omitted span visibly represented by `...` or `…`. Keep useful per-file and hunk structure unless the entire file or hunk is noise.\n\n```diff\n"
+)
+
+func buildUserPrompt(req Request, opts runOptions, numbered string) string {
 	var b strings.Builder
-	b.WriteString("Abridge the following unified diff into a reading diff by submitting a complete remove/replace/fold plan against the numbered original lines. Meat applies your plan to the original diff; you do not write the resulting diff yourself. Coordinates are 1-based and always refer to the original numbering. The `N|` gutter is display-only and is not part of a line's source text. Use preview_plan to inspect sizeable drafts before submit.\n")
-	b.WriteString("Meat automatically derives and merges a mandatory removal plan for imports/includes/requires/use declarations, including multiline blocks and recognized imports inside embedded source strings. They may appear in the numbered input but never in a preview or result. Mandatory hiding wins before move enforcement and extends to exact aligned counterparts even when file extensions classify them differently; compiler-owned Python suite placeholders need no model edits. Do not spend model edit coordinates on these rows, and never fold across them into behavioral rows.\n")
-	if moves := detectedMovesInDiff(req.UnifiedDiff); len(moves) > 0 {
-		fmt.Fprintf(&b, "Meat detected exact source-evidenced moves across hunks/files: %s. Apply identical model-authored keep/remove/fold/replace treatment to every remaining behavioral pair, including matching fold boundaries and equivalent local elisions; asymmetric plans are rejected.\n", formatMovePairs(moves, maxMoveHints))
+	b.WriteString(userPromptIntro)
+	b.WriteString(userPromptImports)
+	moves := detectedMovesInDiff(req.UnifiedDiff)
+	if opts.chunkRun {
+		moves = opts.chunkMoves
+	}
+	if len(moves) > 0 {
+		fmt.Fprintf(&b, userPromptMoves, formatMovePairs(moves, maxMoveHints))
 	}
 	if req.RepoRoot != "" {
-		b.WriteString("Use read_file/grep on the surrounding source only when it changes your judgment about what is load-bearing (or whether a file is generated), then preview or submit.\n")
+		b.WriteString(userPromptTools)
 	} else {
-		b.WriteString("Judge from the diff text alone, then preview or submit.\n")
+		b.WriteString(userPromptNoTools)
 	}
-	b.WriteString("Prefer removing whole lines or ranges. Use fold to replace two or more contiguous same-polarity hunk lines with one machine-generated, indentation-preserving `...` row. Use replace only to elide part of one source line; `new` must match all of `old` with every omitted span visibly represented by `...` or `…`. Keep useful per-file and hunk structure unless the entire file or hunk is noise.\n\n```diff\n")
+	b.WriteString(userPromptProtocol)
 	b.WriteString(numbered)
 	b.WriteString("```\n")
 	return b.String()

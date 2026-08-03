@@ -351,7 +351,7 @@ func TestCompileEditPlan_MergesMandatoryImportsWithModelEdits(t *testing.T) {
 	}
 
 	_, err = compileEditPlan(raw, editPlan{Fold: []lineFold{{StartLine: 8, EndLine: 9}}})
-	if err == nil || !strings.Contains(err.Error(), "crosses mandatory import removal") {
+	if err == nil || !strings.Contains(err.Error(), "crosses automatically removed import rows") {
 		t.Fatalf("cross-import/behavior fold error = %v", err)
 	}
 }

@@ -1,0 +1,10 @@
+diff --git a/src/net/dnsclient_unix.go b/src/net/dnsclient_unix.go
+index ed32ba0280..f9d5d18318 100644
+--- a/src/net/dnsclient_unix.go
++++ b/src/net/dnsclient_unix.go
+@@ -718,7 +718,7 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin
+ 				if err != nil && err != dnsmessage.ErrSectionDone {
+ 					lastErr = &DNSError{
+-						Err:    "cannot marshal DNS message",
++						Err:    errCannotUnmarshalDNSMessage.Error(),
+ 					}

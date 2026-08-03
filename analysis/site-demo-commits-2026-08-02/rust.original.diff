@@ -1,0 +1,106 @@
+diff --git a/helix-term/src/commands/lsp.rs b/helix-term/src/commands/lsp.rs
+index 0494db3..66cfbfc 100644
+--- a/helix-term/src/commands/lsp.rs
++++ b/helix-term/src/commands/lsp.rs
+@@ -1,4 +1,4 @@
+-use futures_util::{stream::FuturesOrdered, FutureExt};
++use futures_util::{stream::FuturesUnordered, FutureExt};
+ use helix_lsp::{
+     block_on,
+     lsp::{
+@@ -341,7 +341,7 @@ fn nested_to_flat(
+ 
+     let mut seen_language_servers = HashSet::new();
+ 
+-    let mut futures: FuturesOrdered<_> = doc
++    let mut futures: FuturesUnordered<_> = doc
+         .language_servers_with_feature(LanguageServerFeature::DocumentSymbols)
+         .filter(|ls| seen_language_servers.insert(ls.id()))
+         .map(|language_server| {
+@@ -460,7 +460,7 @@ pub fn workspace_symbol_picker(cx: &mut Context) {
+     let get_symbols = |pattern: &str, editor: &mut Editor, _data, injector: &Injector<_, _>| {
+         let doc = doc!(editor);
+         let mut seen_language_servers = HashSet::new();
+-        let mut futures: FuturesOrdered<_> = doc
++        let mut futures: FuturesUnordered<_> = doc
+             .language_servers_with_feature(LanguageServerFeature::WorkspaceSymbols)
+             .filter(|ls| seen_language_servers.insert(ls.id()))
+             .map(|language_server| {
+@@ -661,7 +661,7 @@ pub fn code_action(cx: &mut Context) {
+ 
+     let mut seen_language_servers = HashSet::new();
+ 
+-    let mut futures: FuturesOrdered<_> = doc
++    let mut futures: FuturesUnordered<_> = doc
+         .language_servers_with_feature(LanguageServerFeature::CodeAction)
+         .filter(|ls| seen_language_servers.insert(ls.id()))
+         // TODO this should probably already been filtered in something like "language_servers_with_feature"
+@@ -890,7 +890,7 @@ fn goto_single_impl<P, F>(cx: &mut Context, feature: LanguageServerFeature, requ
+     F: Future<Output = helix_lsp::Result<Option<lsp::GotoDefinitionResponse>>> + 'static + Send,
+ {
+     let (view, doc) = current_ref!(cx.editor);
+-    let mut futures: FuturesOrdered<_> = doc
++    let mut futures: FuturesUnordered<_> = doc
+         .language_servers_with_feature(feature)
+         .map(|language_server| {
+             let offset_encoding = language_server.offset_encoding();
+@@ -986,7 +986,7 @@ pub fn goto_reference(cx: &mut Context) {
+     let config = cx.editor.config();
+     let (view, doc) = current_ref!(cx.editor);
+ 
+-    let mut futures: FuturesOrdered<_> = doc
++    let mut futures: FuturesUnordered<_> = doc
+         .language_servers_with_feature(LanguageServerFeature::GotoReference)
+         .map(|language_server| {
+             let offset_encoding = language_server.offset_encoding();
+@@ -1048,7 +1048,7 @@ pub fn hover(cx: &mut Context) {
+     }
+ 
+     let mut seen_language_servers = HashSet::new();
+-    let mut futures: FuturesOrdered<_> = doc
++    let mut futures: FuturesUnordered<_> = doc
+         .language_servers_with_feature(LanguageServerFeature::Hover)
+         .filter(|ls| seen_language_servers.insert(ls.id()))
+         .map(|language_server| {
+diff --git a/helix-term/src/handlers/document_colors.rs b/helix-term/src/handlers/document_colors.rs
+index 7813f31..10082ec 100644
+--- a/helix-term/src/handlers/document_colors.rs
++++ b/helix-term/src/handlers/document_colors.rs
+@@ -1,6 +1,6 @@
+ use std::{collections::HashSet, time::Duration};
+ 
+-use futures_util::{stream::FuturesOrdered, StreamExt};
++use futures_util::{stream::FuturesUnordered, StreamExt};
+ use helix_core::{syntax::config::LanguageServerFeature, text_annotations::InlineAnnotation};
+ use helix_event::{cancelable_future, register_hook};
+ use helix_lsp::lsp;
+@@ -53,7 +53,7 @@ fn request_document_colors(editor: &mut Editor, doc_id: DocumentId) {
+     let cancel = doc.color_swatch_controller.restart();
+ 
+     let mut seen_language_servers = HashSet::new();
+-    let mut futures: FuturesOrdered<_> = doc
++    let mut futures: FuturesUnordered<_> = doc
+         .language_servers_with_feature(LanguageServerFeature::DocumentColors)
+         .filter(|ls| seen_language_servers.insert(ls.id()))
+         .map(|language_server| {
+diff --git a/helix-term/src/handlers/document_links.rs b/helix-term/src/handlers/document_links.rs
+index 5be6176..2944321 100644
+--- a/helix-term/src/handlers/document_links.rs
++++ b/helix-term/src/handlers/document_links.rs
+@@ -1,6 +1,6 @@
+ use std::{collections::HashSet, time::Duration};
+ 
+-use futures_util::{stream::FuturesOrdered, StreamExt};
++use futures_util::{stream::FuturesUnordered, StreamExt};
+ use helix_core::{syntax::config::LanguageServerFeature, Assoc};
+ use helix_event::{cancelable_future, register_hook};
+ use helix_view::{
+@@ -49,7 +49,7 @@ fn request_document_links(editor: &mut Editor, doc_id: DocumentId) {
+     let cancel = doc.document_link_controller.restart();
+ 
+     let mut seen_language_servers = HashSet::new();
+-    let mut futures: FuturesOrdered<_> = doc
++    let mut futures: FuturesUnordered<_> = doc
+         .language_servers_with_feature(LanguageServerFeature::DocumentLinks)
+         .filter(|ls| seen_language_servers.insert(ls.id()))
+         .filter_map(|language_server| {

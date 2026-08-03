@@ -7,26 +7,9 @@ import (
 	"testing"
 )
 
-const exactMoveDiff = "diff --git a/old.txt b/old.txt\n" +
-	"--- a/old.txt\n" +
-	"+++ b/old.txt\n" +
-	"@@ -1,5 +1,2 @@\n" +
-	" context\n" +
-	"-    alpha := prepare(source)\n" +
-	"-    beta := transform(alpha)\n" +
-	"-    publish(beta)\n" +
-	"-    recordSuccess(beta)\n" +
-	"+old_location_gone = true\n" +
-	"diff --git a/new.txt b/new.txt\n" +
-	"--- a/new.txt\n" +
-	"+++ b/new.txt\n" +
-	"@@ -1 +1,6 @@\n" +
-	" context\n" +
-	"+        alpha := prepare(source)\n" +
-	"+        beta := transform(alpha)\n" +
-	"+        publish(beta)\n" +
-	"+        recordSuccess(beta)\n" +
-	"+new_location_ready = true\n"
+// exactMoveDiff aliases the canonical fixture so move tests and the hashed
+// prompt surface stay aligned.
+const exactMoveDiff = surfaceFixtureDiff
 
 var exactMove = detectedMove{
 	Removed: lineRange{StartLine: 6, EndLine: 9},
@@ -365,7 +348,7 @@ func TestPlanFeedback_ReportsSymmetricMoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	feedback := planFeedback(compiled)
-	for _, want := range []string{"Moves: 1 exact cross-hunk/cross-file", "mandatory import precedence", "compression is symmetric", "-6..9 ↔ +16..19"} {
+	for _, want := range []string{"Moves: 1 exact cross-hunk/cross-file", "treated symmetrically", "-6..9 ↔ +16..19"} {
 		if !strings.Contains(feedback, want) {
 			t.Errorf("feedback missing %q:\n%s", want, feedback)
 		}
@@ -394,10 +377,9 @@ func TestAbridge_RejectsAsymmetricMoveThenAcceptsCorrection(t *testing.T) {
 
 	initialPrompt := m.seenMessages[0][0].Content[0].Text
 	if !strings.Contains(initialPrompt, "-6..9 ↔ +16..19") ||
-		!strings.Contains(initialPrompt, "Mandatory hiding wins before move enforcement") ||
 		!strings.Contains(initialPrompt, "keep/remove/fold/replace treatment") ||
 		!strings.Contains(initialPrompt, "equivalent local elisions") ||
-		!strings.Contains(initialPrompt, "asymmetric plans are rejected") {
+		!strings.Contains(initialPrompt, "Asymmetric plans are rejected") {
 		t.Fatalf("initial prompt missing move hint:\n%s", initialPrompt)
 	}
 	var sawPreciseError bool

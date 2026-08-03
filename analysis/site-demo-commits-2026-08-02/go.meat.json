@@ -1,0 +1,7 @@
+{
+  "smart_diff": "diff --git a/src/net/dnsclient_unix.go b/src/net/dnsclient_unix.go\nindex ed32ba0280..f9d5d18318 100644\n--- a/src/net/dnsclient_unix.go\n+++ b/src/net/dnsclient_unix.go\n@@ -718,7 +718,7 @@ func (r *Resolver) goLookupIPCNAMEOrder(ctx context.Context, network, name strin\n \t\t\t\tif err != nil && err != dnsmessage.ErrSectionDone {\n \t\t\t\t\tlastErr = &DNSError{\n-\t\t\t\t\t\tErr:    \"cannot marshal DNS message\",\n+\t\t\t\t\t\tErr:    errCannotUnmarshalDNSMessage.Error(),\n \t\t\t\t\t}\n",
+  "summary": "Use the canonical DNS unmarshal error text consistently when response parsing fails across host and PTR lookups.",
+  "input_tokens": 5620,
+  "output_tokens": 301,
+  "elision": "kept 2/16 changed lines in 1/1 files"
+}

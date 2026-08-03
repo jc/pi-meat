@@ -29,6 +29,12 @@ type toolbox struct {
 	submittedPlan  *compiledPlan
 	submitFeedback string
 	submitSeen     bool
+	// noMoves disables per-plan move DETECTION for chunk runs, where move
+	// uniqueness computed over a fragment would be wrong; moves carries the
+	// whole-diff moves the splitter mapped into this chunk's coordinates,
+	// which are enforced instead.
+	noMoves bool
+	moves   []detectedMove
 }
 
 func editPlanToolSchema(withSummary bool) json.RawMessage {
@@ -59,7 +65,7 @@ func editPlanToolSchema(withSummary bool) json.RawMessage {
 func (tb *toolbox) previewPlanTool() Tool {
 	return Tool{
 		Name:        "preview_plan",
-		Description: "Validate a complete remove/replace/fold plan against the numbered ORIGINAL diff, merge Meat's mandatory source-derived import removals (including exact move counterparts), enforce symmetric model compression of remaining behavioral move rows, and preview the resulting reading diff with retention statistics. Large previews are explicitly truncated. Plans are never incremental.",
+		Description: "Validate a complete remove/replace/fold plan against the numbered ORIGINAL diff and preview the resulting reading diff with retention statistics. Imports are removed automatically and moved code must be treated symmetrically; the feedback reports anything that needs fixing. Large previews are explicitly truncated. Plans are never incremental.",
 		InputSchema: editPlanToolSchema(false),
 	}
 }
@@ -69,7 +75,7 @@ func (tb *toolbox) previewPlanTool() Tool {
 func (tb *toolbox) submitTool() Tool {
 	return Tool{
 		Name:        "submit",
-		Description: "Submit a final complete remove/replace/fold plan against the numbered ORIGINAL diff plus a one-line summary. Meat gives mandatory source-derived import hiding precedence (including exact move counterparts), rejects asymmetric model compression of remaining behavioral move rows, and applies the result locally; do not submit a rewritten diff.",
+		Description: "Submit a final complete remove/replace/fold plan against the numbered ORIGINAL diff plus a one-line summary. Meat applies the plan locally (removing imports automatically and rejecting asymmetric treatment of moved code); do not submit a rewritten diff.",
 		InputSchema: editPlanToolSchema(true),
 	}
 }
@@ -209,7 +215,7 @@ func (tb *toolbox) previewPlan(raw json.RawMessage) (string, bool) {
 	if err := requirePlanArrays(in.Remove, in.Replace, in.Fold); err != nil {
 		return "invalid input: " + err.Error(), true
 	}
-	compiled, err := compileEditPlan(tb.rawDiff, in)
+	compiled, err := compileEditPlanMoves(tb.rawDiff, in, tb.moves, !tb.noMoves)
 	if err != nil {
 		return truncateForTool(fmt.Sprintf("invalid edit plan: %v", err)), true
 	}
@@ -227,7 +233,7 @@ func (tb *toolbox) submit(raw json.RawMessage) (string, bool) {
 	if err := requirePlanArrays(in.Remove, in.Replace, in.Fold); err != nil {
 		return "invalid input: " + err.Error(), true
 	}
-	compiled, err := compileSubmission(tb.rawDiff, in)
+	compiled, err := compileSubmissionMoves(tb.rawDiff, in, tb.moves, !tb.noMoves)
 	if err != nil {
 		return truncateForTool(fmt.Sprintf("invalid edit plan: %v", err)), true
 	}
@@ -246,6 +252,15 @@ func retentionPressure(stats planStats) bool {
 	return stats.visibleChanged >= 80 || stats.visibleChanged*100 >= stats.rawChanged*45
 }
 
+// The static model-visible plan-feedback fragments, named so promptSurface can
+// hash the complete frozen surface.
+const (
+	feedbackRetention    = "Valid source-derived plan.\nRetention: %d/%d visible changed rows (%d%%); %d removed, %d hidden by %d folds"
+	feedbackMoves        = "Moves: %d exact cross-hunk/cross-file span(s) treated symmetrically (%s).\n"
+	feedbackPressureHigh = "Pressure: high retention. Reconsider repeated rename/call-site hunks after one representative anchor, default git context, mechanical prose, duplicate setup/cases, and assertion batches or suites that can become fixed ... folds. Imports are already removed mechanically. For Python, keep each suite owner, required setup, and decisive stimulus/outcome: never hide a table assignment used by a retained loop, or an entire pytester.makeini/makeconftest configuration that defines the scenario. Move folds inside those boundaries. This is advisory: preserve every distinct contract, security or compatibility caveat, condition, lifecycle edge, transformation, effect, stimulus, and outcome.\n"
+	feedbackPressureOK   = "Pressure: acceptable. Preserve uncertain behavior.\n"
+)
+
 func planFeedback(compiled compiledPlan) string {
 	stats := compiled.stats
 	percent := 0
@@ -253,7 +268,7 @@ func planFeedback(compiled compiledPlan) string {
 		percent = stats.visibleChanged * 100 / stats.rawChanged
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Valid source-derived plan.\nRetention: %d/%d visible changed rows (%d%%); %d removed, %d hidden by %d folds",
+	fmt.Fprintf(&b, feedbackRetention,
 		stats.visibleChanged, stats.rawChanged, percent,
 		stats.removedChanged, stats.foldedChanged, stats.foldCount,
 	)
@@ -262,12 +277,12 @@ func planFeedback(compiled compiledPlan) string {
 	}
 	b.WriteString(".\n")
 	if len(compiled.moves) > 0 {
-		fmt.Fprintf(&b, "Moves: %d exact cross-hunk/cross-file span(s) checked after mandatory import precedence; behavioral compression is symmetric (%s).\n", len(compiled.moves), formatMovePairs(compiled.moves, maxMoveHints))
+		fmt.Fprintf(&b, feedbackMoves, len(compiled.moves), formatMovePairs(compiled.moves, maxMoveHints))
 	}
 	if retentionPressure(stats) {
-		b.WriteString("Pressure: high retention. Reconsider repeated rename/call-site hunks after one representative anchor, default git context, mechanical prose, duplicate setup/cases, and assertion batches or suites that can become fixed ... folds. Imports are already removed mechanically. For Python, keep each suite owner, required setup, and decisive stimulus/outcome: never hide a table assignment used by a retained loop, or an entire pytester.makeini/makeconftest configuration that defines the scenario. Move folds inside those boundaries. This is advisory: preserve every distinct contract, security or compatibility caveat, condition, lifecycle edge, transformation, effect, stimulus, and outcome.\n")
+		b.WriteString(feedbackPressureHigh)
 	} else {
-		b.WriteString("Pressure: acceptable. Preserve uncertain behavior.\n")
+		b.WriteString(feedbackPressureOK)
 	}
 	b.WriteString("Preview (revised plans still use ORIGINAL line coordinates):\n")
 	b.WriteString(compiled.smartDiff)

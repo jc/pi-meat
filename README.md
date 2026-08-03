@@ -22,6 +22,10 @@ It takes a while to process a commit for reading.
 So I suggest you have an agent build `meat` into your devtools so that
 it pre-processes it.
 
+Very large diffs are split at file and hunk boundaries and abridged
+chunk by chunk (up to a few MB), so one huge commit still produces a
+single merged reading diff — it just takes proportionally longer.
+
 ## pi extension
 
 This repo is one of those devtools. It is a pi package: the agent gets a

@@ -1,0 +1,13 @@
+diff --git a/helix-term/src/commands/lsp.rs b/helix-term/src/commands/lsp.rs
+index 0494db3..66cfbfc 100644
+--- a/helix-term/src/commands/lsp.rs
++++ b/helix-term/src/commands/lsp.rs
+@@ -341,7 +341,7 @@ fn nested_to_flat(
+ 
+     let mut seen_language_servers = HashSet::new();
+ 
+-    let mut futures: FuturesOrdered<_> = doc
++    let mut futures: FuturesUnordered<_> = doc
+         .language_servers_with_feature(LanguageServerFeature::DocumentSymbols)
+         .filter(|ls| seen_language_servers.insert(ls.id()))
+         .map(|language_server| {

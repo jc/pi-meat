@@ -1,0 +1,7 @@
+{
+  "smart_diff": "diff --git a/helix-term/src/commands/lsp.rs b/helix-term/src/commands/lsp.rs\nindex 0494db3..66cfbfc 100644\n--- a/helix-term/src/commands/lsp.rs\n+++ b/helix-term/src/commands/lsp.rs\n@@ -341,7 +341,7 @@ fn nested_to_flat(\n \n     let mut seen_language_servers = HashSet::new();\n \n-    let mut futures: FuturesOrdered<_> = doc\n+    let mut futures: FuturesUnordered<_> = doc\n         .language_servers_with_feature(LanguageServerFeature::DocumentSymbols)\n         .filter(|ls| seen_language_servers.insert(ls.id()))\n         .map(|language_server| {\n",
+  "summary": "Process LSP requests as they complete with FuturesUnordered across commands and document color/link handlers.",
+  "input_tokens": 13098,
+  "output_tokens": 412,
+  "elision": "kept 2/22 changed lines in 1/3 files"
+}

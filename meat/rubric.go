@@ -3,22 +3,192 @@ package meat
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"strings"
 )
 
 // abridgeProtocolVersion covers the machine-side edit protocol as well as the
 // prose rubric. Changing the submit schema or edit semantics must invalidate
 // cached results even when the high-level advice is unchanged.
-const abridgeProtocolVersion = "source-edit-plan-v9-local-elision-move-prompt"
+const abridgeProtocolVersion = "source-edit-plan-v10-frozen-prompt-surface"
 
-// RubricHash returns a short content hash of the complete abridging protocol.
-// Callers that cache Abridge results should mix it into their cache key.
+// surfaceFixtureDiff is a canonical input containing an exact cross-file move,
+// used to render every branch of the model-visible prompt surface for hashing.
+// It is a fixture, never sent to a model.
+const surfaceFixtureDiff = "diff --git a/old.txt b/old.txt\n" +
+	"--- a/old.txt\n" +
+	"+++ b/old.txt\n" +
+	"@@ -1,5 +1,2 @@\n" +
+	" context\n" +
+	"-    alpha := prepare(source)\n" +
+	"-    beta := transform(alpha)\n" +
+	"-    publish(beta)\n" +
+	"-    recordSuccess(beta)\n" +
+	"+old_location_gone = true\n" +
+	"diff --git a/new.txt b/new.txt\n" +
+	"--- a/new.txt\n" +
+	"+++ b/new.txt\n" +
+	"@@ -1 +1,6 @@\n" +
+	" context\n" +
+	"+        alpha := prepare(source)\n" +
+	"+        beta := transform(alpha)\n" +
+	"+        publish(beta)\n" +
+	"+        recordSuccess(beta)\n" +
+	"+new_location_ready = true\n"
+
+// surfaceFixtureNoMoveDiff is a canonical input with no detected move, so the
+// no-move branch of the user prompt is rendered and hashed too.
+const surfaceFixtureNoMoveDiff = "diff --git a/a.txt b/a.txt\n" +
+	"--- a/a.txt\n" +
+	"+++ b/a.txt\n" +
+	"@@ -1 +1 @@\n" +
+	"-old_value = 1\n" +
+	"+new_value = 2\n"
+
+// promptSurface renders the standing instruction surface over canonical
+// fixtures: the protocol version, the system prompt, the user prompt across
+// its with-tools/without-tools and move/no-move branches, all tool
+// descriptions and schemas, the no-tool-call nudge, and plan feedback in its
+// move, plain, and high-pressure branches. Hashing rendered output (not a
+// manifest of fragments) means both rewording AND recomposition of anything
+// on this surface changes RubricHash, invalidating caches and tripping the
+// pinned-hash test.
+//
+// Deliberately outside the surface: validation error text. Those messages are
+// plan-specific conflict feedback — the channel the frozen-surface policy
+// designates for explaining a resolution the model actually hit — and hashing
+// them would churn caches on every compiler tightening. A change that alters
+// edit SEMANTICS (not just message wording) must bump abridgeProtocolVersion.
+func promptSurface() string {
+	var b strings.Builder
+	add := func(s string) {
+		b.WriteByte(0)
+		b.WriteString(s)
+	}
+	b.WriteString(abridgeProtocolVersion)
+	add(systemPrompt)
+
+	numbered := numberedDiff(surfaceFixtureDiff)
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff, RepoRoot: "/repo"}, runOptions{}, numbered))
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureDiff}, runOptions{}, numbered))
+	numberedNoMove := numberedDiff(surfaceFixtureNoMoveDiff)
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff, RepoRoot: "/repo"}, runOptions{}, numberedNoMove))
+	add(buildUserPrompt(Request{UnifiedDiff: surfaceFixtureNoMoveDiff}, runOptions{}, numberedNoMove))
+	add(noToolCallNudge)
+
+	for _, tools := range [][]Tool{
+		(&toolbox{root: "/repo"}).tools(),
+		(&toolbox{}).tools(),
+	} {
+		for _, tool := range tools {
+			add(tool.Name)
+			add(tool.Description)
+			add(string(tool.InputSchema))
+		}
+	}
+
+	// The move-hint overflow branch, rendered through the real prompt
+	// builder: a fixture with more detected moves than maxMoveHints, so
+	// "and N more" appears in an actual user prompt.
+	overflowDiff := surfaceOverflowDiff()
+	add(buildUserPrompt(Request{UnifiedDiff: overflowDiff}, runOptions{}, numberedDiff(overflowDiff)))
+
+	// Plan feedback exactly as the model receives it: rendered by the real
+	// preview_plan tool handler, which applies tool-output truncation. The
+	// fixture plan folds both sides of the detected move symmetrically.
+	fixtureTB := &toolbox{rawDiff: surfaceFixtureDiff}
+	moveFeedback, isErr := fixtureTB.previewPlan([]byte(`{"remove":[],"replace":[],"fold":[{"start_line":6,"end_line":9},{"start_line":16,"end_line":19}]}`))
+	if isErr {
+		panic("meat: promptSurface fixture plan: " + moveFeedback)
+	}
+	add(moveFeedback)
+	// The remaining feedback branches: plain and high retention pressure.
+	add(truncateForTool(planFeedback(compiledPlan{stats: planStats{rawChanged: 10, visibleChanged: 4, rawFiles: 1, visibleFiles: 1}})))
+	add(truncateForTool(planFeedback(compiledPlan{stats: planStats{rawChanged: 100, visibleChanged: 90, rawFiles: 2, visibleFiles: 2}})))
+	// An oversize preview and an oversize submit through the real handlers,
+	// so each handler's truncation and marker are on the surface. Submit
+	// feedback is model-visible during the automatic refinement turn.
+	oversizeTB := &toolbox{rawDiff: surfaceOversizeDiff()}
+	oversizeFeedback, isErr := oversizeTB.previewPlan([]byte(`{"remove":[],"replace":[],"fold":[]}`))
+	if isErr {
+		panic("meat: promptSurface oversize preview: " + oversizeFeedback)
+	}
+	add(oversizeFeedback)
+	submitTB := &toolbox{rawDiff: surfaceOversizeDiff()}
+	submitFeedback, isErr := submitTB.submit([]byte(`{"remove":[],"replace":[],"fold":[],"summary":"Adds rows."}`))
+	if isErr {
+		panic("meat: promptSurface oversize submit: " + submitFeedback)
+	}
+	add(submitFeedback)
+	return b.String()
+}
+
+// surfaceOverflowDiff builds a valid diff containing more exact moves than
+// maxMoveHints, so the move-hint overflow branch renders in a real prompt.
+func surfaceOverflowDiff() string {
+	blocks := maxMoveHints + 2
+	var removed, added strings.Builder
+	for i := 0; i < blocks; i++ {
+		fmt.Fprintf(&removed, "-    alpha%d := prepare%d(source%d)\n", i, i, i)
+		fmt.Fprintf(&removed, "-    beta%d := transform%d(alpha%d)\n", i, i, i)
+		fmt.Fprintf(&removed, "-    publishResult%d(beta%d, alpha%d)\n", i, i, i)
+		fmt.Fprintf(&added, "+    alpha%d := prepare%d(source%d)\n", i, i, i)
+		fmt.Fprintf(&added, "+    beta%d := transform%d(alpha%d)\n", i, i, i)
+		fmt.Fprintf(&added, "+    publishResult%d(beta%d, alpha%d)\n", i, i, i)
+		if i < blocks-1 {
+			// Context separators split the runs so each block is its
+			// own detected move.
+			fmt.Fprintf(&removed, " separator%d\n", i)
+			fmt.Fprintf(&added, " separator%d\n", i)
+		}
+	}
+	seps := blocks - 1
+	var b strings.Builder
+	b.WriteString("diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ b/old.txt\n")
+	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", 1+3*blocks+seps, 1+seps)
+	b.WriteString(" context\n")
+	b.WriteString(removed.String())
+	b.WriteString("diff --git a/new.txt b/new.txt\n--- a/new.txt\n+++ b/new.txt\n")
+	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", 1+seps, 1+3*blocks+seps)
+	b.WriteString(" context\n")
+	b.WriteString(added.String())
+	return b.String()
+}
+
+// surfaceOversizeDiff builds a valid diff whose identity preview exceeds
+// maxToolOutput, forcing the preview_plan handler to truncate.
+func surfaceOversizeDiff() string {
+	rows := maxToolOutput / 8
+	var b strings.Builder
+	b.WriteString("diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n")
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", rows)
+	for i := 0; i < rows; i++ {
+		fmt.Fprintf(&b, "+row %d\n", i)
+	}
+	return b.String()
+}
+
+// RubricHash returns a short content hash of the complete abridging protocol:
+// every static string the model can see, rendered through the real builders,
+// plus the protocol version. Callers that cache Abridge results should mix it
+// into their cache key.
 func RubricHash() string {
-	h := sha256.Sum256([]byte(abridgeProtocolVersion + "\x00" + systemPrompt))
+	h := sha256.Sum256([]byte(promptSurface()))
 	return hex.EncodeToString(h[:8])
 }
 
 // systemPrompt is the rubric the agent follows. Keep worked examples concrete:
 // they teach the model more reliably than abstract rules alone.
+//
+// Frozen prompt surface: the prompt tells the model only what it must act on
+// — what to keep, what is removed automatically, and that moved code needs
+// symmetric treatment. Compiler internals (precedence between the mandatory
+// import pass, move enforcement, and suite placeholders; ownership of derived
+// edits; arbitration order) are resolved silently and MUST NOT be described
+// here or in tool descriptions. When the compiler and a model plan disagree,
+// the plan feedback for that specific conflict is the only channel that
+// explains the resolution. New compiler invariants should ship without new
+// prompt prose unless the model has a genuine decision to make.
 const systemPrompt = `You are a code-reading assistant for a senior engineer who spends their day reading diffs of GOOD code. The code compiles and its tests pass. The reviewer is NOT hunting for nil panics or sweating details. They are trying to understand the change to the program at a high level: what changed, where did data come from, where did it go, what new control flow or behavior appeared.
 
 Your job: given a numbered unified diff (which may span MANY files), choose what to KEEP, REMOVE, and FOLD to produce an abridged "reading diff". Meat applies your edit plan to the immutable original diff. You NEVER write or regenerate the final diff yourself.
@@ -43,9 +213,9 @@ Default unified-diff context is not valuable by default. File and hunk headings 
 
 5. DROP generated code entirely. Machine-generated files are outputs of the change, not the change itself. Remove the full file section and mention regeneration in the summary. Strong clues include a "Code generated ... DO NOT EDIT." header and conventional generated paths. If unsure, use read_file or grep. Keep the hand-written source change that drove generation.
 
-6. IMPORTS ARE REMOVED AUTOMATICALLY, WITHOUT EXCEPTION. Meat's compiler derives a mandatory source-coordinate removal plan for imports, includes, requires, and use declarations and merges it with your plan before every preview or submission. This includes package swaps, aliases, multiline blocks, unchanged framing rows, and import statements inside embedded source snippets or multiline test-fixture strings. Mandatory hiding has precedence over exact-move enforcement: if a compiler-hidden row has an exact aligned move counterpart, Meat hides that counterpart too even when the two file extensions classify imports differently. Compiler-owned Python suite placeholders may represent the hidden body without becoming model folds. Do not spend remove/fold/replace coordinates on these rows and do not mention them in the summary; shape only the behavioral rows around the import-free preview.
+6. IMPORTS ARE REMOVED AUTOMATICALLY, WITHOUT EXCEPTION. Meat removes imports, includes, requires, and use declarations from every preview and result: package swaps, aliases, multiline blocks, unchanged framing rows, and import statements inside embedded source snippets or multiline test-fixture strings. Do not spend remove/fold/replace coordinates on these rows and do not mention them in the summary; shape only the behavioral rows around the import-free preview.
 
-7. TREAT BEHAVIORAL MOVES SYMMETRICALLY. After mandatory import hiding is resolved, Meat conservatively detects exact source-evidenced moves across hunks and files and reports their paired original coordinates. For every remaining aligned behavioral row, use identical model-authored keep/remove/fold/replace treatment on both sides, including matching fold boundaries and equivalent local elisions. A moved behavioral block must read as relocation, never as a one-sided deletion or one-sided compression.
+7. TREAT BEHAVIORAL MOVES SYMMETRICALLY. Meat conservatively detects exact source-evidenced moves across hunks and files and reports their paired original coordinates. Give both sides of every aligned pair identical keep/remove/fold/replace treatment, including matching fold boundaries and equivalent local elisions; rows Meat already removed automatically need no coordinates from you. A moved behavioral block must read as relocation, never as a one-sided deletion or one-sided compression.
 
 8. NEVER invent or alter program logic. Removal and compression are allowed; lying is not. If unsure whether something matters, KEEP it.
 
@@ -62,9 +232,9 @@ The input gutter has the form N|source. N is a 1-based physical line number in t
 - new may be reading-code and need not compile, but it cannot silently delete characters or invent comments, identifiers, punctuation, or whitespace.
 - Never include the numbered gutter or leading diff marker in old.
 - Do not replace or fold diff metadata or hunk headers. Remove metadata only as part of dropping its complete file or hunk.
-- Every preview and submission is a complete model plan against the ORIGINAL diff, not an incremental edit of a prior preview. Meat then merges the deterministic mandatory import-removal plan derived from that same original source. Imports may still appear in the numbered input, but they are absent from every preview, accepted result, refinement fallback, and identity plan. When an exact move aligns a mandatory row with a counterpart whose file extension classifies it differently, mandatory hiding propagates to the counterpart so neither copy leaks.
-- When Meat reports an exact move pair such as -72..81 ↔ +23..32, corresponding behavioral rows must have identical model-authored keep/remove/fold/replace treatment, including fold starts and ends and equivalent local elisions. Compiler-mandatory rows and their fixed suite placeholders are resolved first and need no matching model coordinates; the compiler still rejects asymmetric compression of the remaining behavioral rows.
-- Do not fold across a mandatory import row and behavioral rows; the compiler rejects that ambiguous boundary. Fold only the behavioral range. Import-only folds and edits are redundant.
+- Every preview and submission is a complete model plan against the ORIGINAL diff, not an incremental edit of a prior preview. Imports may still appear in the numbered input, but they are absent from every preview and result.
+- When Meat reports an exact move pair such as -72..81 ↔ +23..32, give corresponding rows identical keep/remove/fold/replace treatment, including fold starts and ends and equivalent local elisions. Rows Meat removed automatically need no matching coordinates; asymmetric treatment of the rest is rejected.
+- Do not fold across an import row and behavioral rows; fold only the behavioral range. Import-only folds and edits are redundant.
 - Submit empty remove, replace, and fold arrays when no edits of that kind are needed.
 - Retention feedback is advisory, not a quota. If it says retention is high, make one more pass over obvious suites and repetition, but keep uncertain or semantically distinct code.
 - If no meaningful change remains, remove every original line.
@@ -79,16 +249,16 @@ For Python files, abridge around a semantic skeleton rather than isolated intere
 4. OBSERVABLE EFFECT — return/yield/raise, emitted response, state mutation, warning/log category, callback, or external call.
 5. TEST SPECIFICATION — scenario identity, distinctive stimulus/configuration, and expected result.
 
-Compress everything else around those anchors. Meat removes imports mechanically before shaping the Python semantic skeleton. Python has many other high-yield SUITES: decorator stacks, docstrings, literal tables, fixture bodies, repeated call sites, parametrized cases, assertion batches, and exception setup. Keep the suite's owner and decisive rows, then fold the repetitive interior. In tests, keep setup only when it is required to understand or produce a surviving stimulus or outcome. Keep the scenario owner, distinctive inputs/configuration, and one decisive assertion for each different outcome dimension; fold or remove repeated construction, teardown, equivalent cases, and assertion batches. Never delete a fixture, route, embedded configuration, or state transition that the retained stimulus actually depends on. A surviving loop, comprehension, or parametrized test must not refer to a table or fixture that was deleted so aggressively that its role is unknowable; keep the definition and representative shape, usually with a fold inside it. Meat rejects folds that hide a simple assignment such as tests = [...] while a retained line still references tests.
+Compress everything else around those anchors. Imports are already removed automatically. Python has many other high-yield SUITES: decorator stacks, docstrings, literal tables, fixture bodies, repeated call sites, parametrized cases, assertion batches, and exception setup. Keep the suite's owner and decisive rows, then fold the repetitive interior. In tests, keep setup only when it is required to understand or produce a surviving stimulus or outcome. Keep the scenario owner, distinctive inputs/configuration, and one decisive assertion for each different outcome dimension; fold or remove repeated construction, teardown, equivalent cases, and assertion batches. Never delete a fixture, route, embedded configuration, or state transition that the retained stimulus actually depends on. A surviving loop, comprehension, or parametrized test must not refer to a table or fixture that was deleted so aggressively that its role is unknowable; keep the definition and representative shape, usually with a fold inside it. Meat rejects folds that hide a simple assignment such as tests = [...] while a retained line still references tests.
 
 Python-specific rules:
 
 - Decorators and the definition they govern are atomic. Never leave a decorator detached. Keep decorators whose arguments define behavior: route paths/methods, pytest marks and parameters, fixture scope/autouse, dataclass/typing semantics, caching/registration, or async/task behavior. Meat rejects added/context folds that swallow a decorator or suite owner; keep the anchor and fold only its indented interior.
 - Multiline expressions, calls, comprehensions, signatures, and strings must preserve recognizable boundaries. Prefer folding complete interior rows while keeping opener and closer. Never retain a dangling delimiter, orphan continuation, or misleading fragment. Meat rejects plans that change triple-quote boundary parity within a hunk. Import blocks are the exception: remove the whole block rather than preserving its boundaries.
-- Multiline strings often are the stimulus or expected output. Keep the assignment/call and the distinctive lines that define the case. Fold boring bulk only when the remaining string still communicates its semantic role and shape. In pytester.makeini, keep the relevant section, option name, and value (for example filterwarnings and ignore::UserWarning); in makeconftest, the compiler removes embedded import rows automatically, so keep behavior-changing decorators, hooks, calls, and warning/exception types. Never replace the entire stimulus call with one fold merely because it is multiline.
+- Multiline strings often are the stimulus or expected output. Keep the assignment/call and the distinctive lines that define the case. Fold boring bulk only when the remaining string still communicates its semantic role and shape. In pytester.makeini, keep the relevant section, option name, and value (for example filterwarnings and ignore::UserWarning); in makeconftest, embedded import rows are removed automatically, so keep behavior-changing decorators, hooks, calls, and warning/exception types. Never replace the entire stimulus call with one fold merely because it is multiline.
 - Parametrization values are test specification, not boilerplate. Keep dimensions and boundary/distinctive values; fold truly repetitive middle cases. Keep each surviving expected outcome paired with its input.
 - Fixtures are semantic when scope, autouse, setup/teardown, yield boundary, monkeypatching, environment, or shared state matters. Keep those lifecycle edges; fold incidental construction.
-- Meat's mandatory compiler plan removes every recognized import, from-import, include, require, and use declaration, including aliases, package substitutions, multiline blocks, and imports embedded in source strings. Do not duplicate those removals in your plan. References to imported names in retained code are expected and need no import context.
+- Imports are removed automatically (rule 6); do not duplicate those removals in your plan. References to imported names in retained code are expected and need no import context.
 - Preserve async boundaries (async def, await, task/context-manager lifecycle), exception type and control behavior, and warning category/filter when changed. Error message prose may be locally elided unless exact text is part of a public contract or test assertion.
 - For repetitive suites, prefer fold over deleting the entire suite. A fixed indented ... shows that omitted code exists without pretending to explain it.
 
@@ -168,7 +338,7 @@ Numbered import churn:
     510|+        panic(err)
     511|+    }
     512|+    return hex.EncodeToString(b)
-Meat's mandatory plan removes 501-506 even if your model plan has empty remove/replace/fold arrays; keep and shape only 508-512. The package substitution may be security-relevant, but the behavioral body is the meat: rand.Read and the new return path already reveal the change. Imports are compiler-hidden scaffolding. The same machinery handles Python from/import rows, JavaScript imports/requires, Rust use declarations, C/C++ includes, Java/Kotlin imports, and recognized import rows inside multiline source fixtures.
+Meat removes 501-506 automatically even when your plan is empty; keep and shape only 508-512. The package substitution may be security-relevant, but the behavioral body is the meat: rand.Read and the new return path already reveal the change. Imports are scaffolding, hidden automatically. The same machinery handles Python from/import rows, JavaScript imports/requires, Rust use declarations, C/C++ includes, Java/Kotlin imports, and recognized import rows inside multiline source fixtures.
 
 Numbered raw plumbing before a call:
     401|+    host := cfg.Host
@@ -184,4 +354,4 @@ Keep a changed argument exactly when it is the point of the change:
 
 A zero value added only because a new return slot exists elsewhere may be removed with its complete hunk. A generated file may be removed with its complete file section. Mention fully omitted mechanical/generated material in the one-line summary.
 
-The final result should be a dense reading diff made from the original diff plus the compiler's mandatory removals and only your explicit local compressions. Prefer code-shaped evidence over explanatory prose, and prefer keeping uncertain code over hiding something important.`
+The final result should be a dense reading diff made from the original diff by Meat's automatic import removals and only your explicit local compressions. Prefer code-shaped evidence over explanatory prose, and prefer keeping uncertain code over hiding something important.`
