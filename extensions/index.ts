@@ -18,10 +18,10 @@
  *   3. `go build` of the Go source bundled in this package, cached under
  *      ${XDG_CACHE_HOME:-~/.cache}/pi-meat/ keyed by package version/platform.
  *
- * Credentials: meat reads OPENAI_API_KEY / ANTHROPIC_API_KEY from the
- * environment. If neither is set, this extension tries to reuse an API key
- * from pi's model registry (openai first, then anthropic with a Claude
- * MEAT_MODEL fallback). $MEAT_MODEL and $MEAT_CACHE are passed through.
+ * Model access: extension invocations use the model currently selected in the
+ * active pi session. Provider calls stay in pi, so its resolved API key/OAuth,
+ * headers, provider-scoped environment, base URL, and thinking level are reused.
+ * Standalone meat CLI invocations keep their normal environment-based behavior.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -31,6 +31,7 @@ import {
 	formatSize,
 	truncateHead,
 } from "@earendil-works/pi-coding-agent";
+import { startModelBridge } from "./model-bridge.js";
 import { Text } from "@earendil-works/pi-tui";
 import { execFile } from "node:child_process";
 import * as crypto from "node:crypto";
@@ -86,6 +87,10 @@ function run(
 	} = {},
 ): Promise<RunResult> {
 	return new Promise((resolve, reject) => {
+		let kill: (() => void) | undefined;
+		const cleanup = () => {
+			if (kill && opts.signal) opts.signal.removeEventListener("abort", kill);
+		};
 		const child = execFile(
 			cmd,
 			args,
@@ -97,6 +102,7 @@ function run(
 				windowsHide: true,
 			},
 			(error, stdout, stderr) => {
+				cleanup();
 				if (error && (error as NodeJS.ErrnoException).code === "ENOENT") {
 					reject(new Error(`command not found: ${cmd}`));
 					return;
@@ -110,7 +116,7 @@ function run(
 			},
 		);
 		if (opts.signal) {
-			const kill = () => child.kill("SIGTERM");
+			kill = () => child.kill("SIGTERM");
 			if (opts.signal.aborted) kill();
 			else opts.signal.addEventListener("abort", kill, { once: true });
 		}
@@ -136,35 +142,26 @@ function findOnPath(name: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// meat binary resolution: MEAT_BIN → PATH → build from bundled Go source
+// meat binary resolution: compatible MEAT_BIN → PATH → bundled Go source
 // ---------------------------------------------------------------------------
 
+const MODEL_BRIDGE_PROTOCOL = "pi-meat-model-bridge-v1";
 let resolvedBinary: string | null = null;
 
-async function resolveMeatBinary(onUpdate?: (msg: string) => void): Promise<string> {
-	if (resolvedBinary) return resolvedBinary;
-
-	const explicit = process.env.MEAT_BIN;
-	if (explicit) {
-		if (!fs.existsSync(explicit)) {
-			throw new Error(`MEAT_BIN is set to ${explicit} but that file does not exist`);
-		}
-		resolvedBinary = explicit;
-		return resolvedBinary;
+async function supportsModelBridge(binary: string): Promise<boolean> {
+	try {
+		const result = await run(binary, ["-pi-bridge-info"], { timeoutMs: 5_000 });
+		return result.code === 0 && result.stdout.trim() === MODEL_BRIDGE_PROTOCOL;
+	} catch {
+		return false;
 	}
+}
 
-	const onPath = findOnPath("meat");
-	if (onPath) {
-		resolvedBinary = onPath;
-		return resolvedBinary;
-	}
-
-	// Build from the Go source bundled in this package.
+async function resolveBundledMeatBinary(onUpdate?: (msg: string) => void): Promise<string> {
 	if (!findOnPath("go")) {
 		throw new Error(
-			"meat binary not found and Go is not installed, so pi-meat cannot build it " +
-				"from the bundled source. Install Go (https://go.dev), install meat yourself " +
-				"(`go install meat.dev/cmd/meat@latest`), or point MEAT_BIN at an existing binary.",
+			"no bridge-compatible meat binary found and Go is not installed, so pi-meat cannot " +
+				"build one from the bundled source. Install Go (https://go.dev) or update MEAT_BIN.",
 		);
 	}
 
@@ -175,10 +172,10 @@ async function resolveMeatBinary(onUpdate?: (msg: string) => void): Promise<stri
 	fs.mkdirSync(cacheDir, { recursive: true });
 	const target = path.join(
 		cacheDir,
-		`meat-${packageVersion()}-${process.platform}-${process.arch}${EXE_SUFFIX}`,
+		`meat-${packageVersion()}-bridge-v1-${process.platform}-${process.arch}${EXE_SUFFIX}`,
 	);
 	if (!fs.existsSync(target)) {
-		onUpdate?.("building meat from bundled Go source (one-time)…");
+		onUpdate?.("building bridge-compatible meat from bundled Go source (one-time)…");
 		const tmp = `${target}.tmp-${process.pid}`;
 		const build = await run("go", ["build", "-o", tmp, "./cmd/meat"], {
 			cwd: PKG_ROOT,
@@ -194,36 +191,34 @@ async function resolveMeatBinary(onUpdate?: (msg: string) => void): Promise<stri
 		}
 		fs.renameSync(tmp, target); // atomic publish; concurrent builders race harmlessly
 	}
-	resolvedBinary = target;
+	return target;
+}
+
+async function resolveMeatBinary(onUpdate?: (msg: string) => void): Promise<string> {
+	if (resolvedBinary) return resolvedBinary;
+
+	const explicit = process.env.MEAT_BIN;
+	if (explicit) {
+		if (!fs.existsSync(explicit)) {
+			throw new Error(`MEAT_BIN is set to ${explicit} but that file does not exist`);
+		}
+		if (!(await supportsModelBridge(explicit))) {
+			throw new Error(`MEAT_BIN is set to ${explicit}, but that binary is not compatible with pi's active-model bridge`);
+		}
+		resolvedBinary = explicit;
+		return resolvedBinary;
+	}
+
+	const onPath = findOnPath("meat");
+	if (onPath && (await supportsModelBridge(onPath))) {
+		resolvedBinary = onPath;
+		return resolvedBinary;
+	}
+
+	resolvedBinary = await resolveBundledMeatBinary(onUpdate);
 	return resolvedBinary;
 }
 
-// ---------------------------------------------------------------------------
-// Credentials: inherit env; fall back to pi's model registry for an API key
-// ---------------------------------------------------------------------------
-
-async function meatEnv(ctx?: ExtensionContext): Promise<NodeJS.ProcessEnv> {
-	const env: NodeJS.ProcessEnv = { ...process.env };
-	if (env.OPENAI_API_KEY || env.ANTHROPIC_API_KEY) return env;
-	const registry = ctx?.modelRegistry;
-	if (!registry) return env;
-	try {
-		const openai = await registry.getApiKeyForProvider("openai");
-		if (openai) {
-			env.OPENAI_API_KEY = openai;
-			return env;
-		}
-		const anthropic = await registry.getApiKeyForProvider("anthropic");
-		if (anthropic) {
-			env.ANTHROPIC_API_KEY = anthropic;
-			// meat's default model is OpenAI; without an OpenAI key, aim it at Claude.
-			if (!env.MEAT_MODEL) env.MEAT_MODEL = "claude-sonnet-4-5";
-		}
-	} catch {
-		// registry unavailable — meat will report missing credentials itself
-	}
-	return env;
-}
 
 // ---------------------------------------------------------------------------
 // Running meat
@@ -244,7 +239,6 @@ interface MeatInvocation {
 	staged?: boolean;
 	worktree?: boolean;
 	diff?: string;
-	model?: string;
 	noCache?: boolean;
 	cwd: string;
 }
@@ -258,7 +252,7 @@ function invocationLabel(inv: MeatInvocation): string {
 
 async function runMeat(
 	inv: MeatInvocation,
-	ctx: ExtensionContext | undefined,
+	ctx: ExtensionContext,
 	signal: AbortSignal | undefined,
 	onUpdate?: (msg: string) => void,
 ): Promise<MeatResult> {
@@ -270,8 +264,8 @@ async function runMeat(
 	}
 
 	const binary = await resolveMeatBinary(onUpdate);
-	const args = ["-json"];
-	if (inv.model) args.push("-model", inv.model);
+	const bridge = await startModelBridge(ctx, signal);
+	const args = ["-json", "-model", bridge.cacheIdentity];
 	if (inv.noCache) args.push("-no-cache");
 	if (inv.staged) args.push("-staged");
 	if (inv.worktree) args.push("-w");
@@ -280,14 +274,22 @@ async function runMeat(
 	// read stdin instead of defaulting to HEAD.
 	if (inv.diff === undefined && !inv.staged && !inv.worktree) args.push(inv.target ?? "HEAD");
 
-	const env = await meatEnv(ctx);
-	const result = await run(binary, args, {
-		cwd: inv.cwd,
-		env,
-		signal,
-		timeoutMs: 10 * 60 * 1000,
-		input: inv.diff,
-	});
+	let result: RunResult;
+	try {
+		result = await run(binary, args, {
+			cwd: inv.cwd,
+			env: {
+				...process.env,
+				PI_MEAT_MODEL_BRIDGE_URL: bridge.url,
+				PI_MEAT_MODEL_BRIDGE_TOKEN: bridge.token,
+			},
+			signal,
+			timeoutMs: 10 * 60 * 1000,
+			input: inv.diff,
+		});
+	} finally {
+		await bridge.close();
+	}
 	if (result.code !== 0) {
 		const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
 		throw new Error(`meat ${invocationLabel(inv)} failed: ${detail}`);
@@ -349,9 +351,6 @@ const MeatParams = Type.Object({
 	diff: Type.Optional(
 		Type.String({ description: "A unified diff to abridge directly, instead of a git target." }),
 	),
-	model: Type.Optional(
-		Type.String({ description: "Model override (otherwise $MEAT_MODEL or meat's default)." }),
-	),
 	no_cache: Type.Optional(
 		Type.Boolean({ description: "Ignore the cached result and recompute." }),
 	),
@@ -386,7 +385,6 @@ export default function (pi: ExtensionAPI) {
 					staged: params.staged,
 					worktree: params.worktree,
 					diff: params.diff,
-					model: params.model,
 					noCache: params.no_cache,
 					cwd,
 				},
@@ -487,8 +485,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("meat", {
 		description:
-			"Abridge a change into a reading diff and add it to the session context. " +
-			"Usage: /meat [revision|range] [--staged|--worktree] [--no-cache] [--model <id>] (default: HEAD)",
+			"Abridge a change with the active pi session model and add it to the session context. " +
+			"Usage: /meat [revision|range] [--staged|--worktree] [--no-cache] (default: HEAD)",
 		getArgumentCompletions: (prefix) => {
 			const items = ["HEAD", "HEAD~1", "HEAD~3", "--staged", "--worktree", "--no-cache"].map(
 				(value) => ({ value, label: value }),
@@ -504,9 +502,7 @@ export default function (pi: ExtensionAPI) {
 				if (tok === "--staged" || tok === "-staged") inv.staged = true;
 				else if (tok === "--worktree" || tok === "-w") inv.worktree = true;
 				else if (tok === "--no-cache") inv.noCache = true;
-				else if ((tok === "--model" || tok === "-model") && tokens[i + 1]) {
-					inv.model = tokens[++i];
-				} else if (!tok.startsWith("-") && inv.target === undefined) {
+				else if (!tok.startsWith("-") && inv.target === undefined) {
 					inv.target = tok;
 				} else {
 					ctx.ui.notify(`meat: ignoring unrecognized argument ${tok}`, "warning");
@@ -516,7 +512,7 @@ export default function (pi: ExtensionAPI) {
 			const label = invocationLabel(inv);
 			ctx.ui.setStatus("pi-meat", `meat: reading ${label}…`);
 			try {
-				const res = await runMeat(inv, ctx, undefined, (msg) =>
+				const res = await runMeat(inv, ctx, ctx.signal, (msg) =>
 					ctx.ui.setStatus("pi-meat", `meat: ${msg}`),
 				);
 				pi.sendMessage(

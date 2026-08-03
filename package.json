@@ -1,6 +1,6 @@
 {
   "name": "pi-meat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "pi extension + CLI that abridges code diffs into reading diffs — review agent-written code at the concept level, not the line level",
   "type": "module",
   "keywords": [
@@ -31,7 +31,7 @@
     ]
   },
   "scripts": {
-    "test": "go test ./...",
+    "test": "go test ./... && npm run check && node --test tests/model-bridge.test.mjs",
     "check": "tsc --noEmit"
   },
   "peerDependencies": {

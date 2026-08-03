@@ -44,6 +44,7 @@ If `meat` is not on your `PATH` the extension builds it once from the Go
 source bundled in the package (needs Go installed) and caches the binary
 in `~/.cache/pi-meat`. Set `MEAT_BIN` to use a specific binary.
 
-Keys come from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` (and `MEAT_MODEL`,
-`MEAT_CACHE`) as usual. If neither key is in the environment, the
-extension borrows an API key from pi's own model registry.
+Inside pi, meat uses the model currently selected in that session, including
+its resolved API key or OAuth credentials, custom headers, provider settings,
+and thinking level. The standalone CLI continues to use `OPENAI_API_KEY` /
+`ANTHROPIC_API_KEY`, `MEAT_MODEL`, and the matching base-URL variables.

@@ -26,9 +26,13 @@ func resolveModel(model, fallback string) string {
 	return model
 }
 
-// NewModelFromEnv constructs the built-in backend appropriate for model.
-// Claude model IDs use Anthropic Messages; all other IDs use OpenAI Responses.
+// NewModelFromEnv constructs the configured backend. A pi session bridge takes
+// precedence so extension runs use pi's active model and resolved authentication;
+// standalone CLI runs continue to select the built-in provider from the model id.
 func NewModelFromEnv(ctx context.Context, model string) (Model, error) {
+	if bridgeURL := os.Getenv("PI_MEAT_MODEL_BRIDGE_URL"); bridgeURL != "" {
+		return NewBridgeModel(bridgeURL, os.Getenv("PI_MEAT_MODEL_BRIDGE_TOKEN"))
+	}
 	model = ResolveModel(model)
 	if isAnthropicModel(model) {
 		return NewAnthropicFromEnv(ctx, model)

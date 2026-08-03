@@ -94,12 +94,17 @@ func main() {
 	staged := fs.Bool("staged", false, "read the staged changes (git diff --staged)")
 	worktree := fs.Bool("w", false, "read the unstaged working-tree changes (git diff)")
 	jsonOut := fs.Bool("json", false, "emit the result as JSON on stdout")
+	piBridgeInfo := fs.Bool("pi-bridge-info", false, "print the internal pi model bridge protocol")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag already printed the error and (for -h) the usage.
 		if err == flag.ErrHelp {
 			os.Exit(0)
 		}
 		os.Exit(2)
+	}
+	if *piBridgeInfo {
+		fmt.Fprintln(os.Stdout, "pi-meat-model-bridge-v1")
+		return
 	}
 
 	diff, source, err := readDiff(fs.Args(), *staged, *worktree)
