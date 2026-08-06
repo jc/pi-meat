@@ -48,3 +48,32 @@ Inside pi, meat uses the model currently selected in that session, including
 its resolved API key or OAuth credentials, custom headers, provider settings,
 and thinking level. The standalone CLI continues to use `OPENAI_API_KEY` /
 `ANTHROPIC_API_KEY`, `MEAT_MODEL`, and the matching base-URL variables.
+
+### Extension API
+
+Other pi extensions can abridge a diff with the active session model without
+injecting a tool result or message into the conversation:
+
+```ts
+import { abridgeWithActiveModel } from "pi-meat/api";
+
+const result = await abridgeWithActiveModel(
+  ctx,
+  {
+    cwd: ctx.cwd,
+    diff: unifiedDiff,
+  },
+  {
+    signal,
+    onProgress: (message) => updateStatus(message),
+  },
+);
+
+console.log(result.summary, result.smartDiff);
+```
+
+The API also accepts `target`, `staged`, or `worktree` instead of `diff` and
+returns the same structured summary, reading diff, elision, token counts, and
+cache status used by the built-in tool and `/meat` command. It owns the local
+model bridge and Meat subprocess lifecycle; callers only provide the review
+range and render the result.

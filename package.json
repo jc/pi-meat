@@ -3,6 +3,10 @@
   "version": "0.1.1",
   "description": "pi extension + CLI that abridges code diffs into reading diffs — review agent-written code at the concept level, not the line level",
   "type": "module",
+  "exports": {
+    ".": "./extensions/index.ts",
+    "./api": "./extensions/api.ts"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",

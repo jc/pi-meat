@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let buildDir;
+let apiModule;
 let bridgeModule;
 
 before(async () => {
@@ -27,6 +28,7 @@ before(async () => {
 		],
 		{ cwd: root },
 	);
+	apiModule = await import(pathToFileURL(path.join(buildDir, "api.js")).href);
 	bridgeModule = await import(pathToFileURL(path.join(buildDir, "model-bridge.js")).href);
 });
 
@@ -170,6 +172,87 @@ test("cache identity changes with resolved provider configuration", async () => 
 	} finally {
 		await Promise.all([first.close(), second.close()]);
 	}
+});
+
+test("public API abridges an arbitrary diff with the active model", async () => {
+	const fakeMeat = path.join(buildDir, "fake-meat.mjs");
+	await writeFile(
+		fakeMeat,
+		`#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes("-pi-bridge-info")) {
+  process.stdout.write("pi-meat-model-bridge-v1\\n");
+  process.exit(0);
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", async () => {
+  try {
+    const response = await fetch(process.env.PI_MEAT_MODEL_BRIDGE_URL, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + process.env.PI_MEAT_MODEL_BRIDGE_TOKEN,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        system: "system",
+        messages: [{ role: "user", content: [{ type: "text", text: input }] }],
+        tools: [],
+      }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const generation = await response.json();
+    process.stderr.write("meat: cached\\n");
+    process.stdout.write(JSON.stringify({
+      summary: generation.content.find((block) => block.type === "text")?.text ?? "",
+      smart_diff: input,
+      elision: "1 line kept",
+      input_tokens: generation.input_tokens,
+      output_tokens: generation.output_tokens,
+    }));
+  } catch (error) {
+    process.stderr.write(String(error));
+    process.exitCode = 1;
+  }
+});
+`,
+	);
+	await chmod(fakeMeat, 0o755);
+
+	const previousMeatBin = process.env.MEAT_BIN;
+	process.env.MEAT_BIN = fakeMeat;
+	const selectedModel = model();
+	const provider = {
+		streamSimple() {
+			return {
+				result: async () =>
+					assistant(selectedModel, [{ type: "text", text: "public API result" }], "stop"),
+			};
+		},
+	};
+	try {
+		const result = await apiModule.abridgeWithActiveModel(context(selectedModel, provider), {
+			cwd: root,
+			diff: "diff --git a/a b/a\\n+behavior\\n",
+		});
+		assert.equal(result.summary, "public API result");
+		assert.equal(result.smartDiff, "diff --git a/a b/a\\n+behavior\\n");
+		assert.equal(result.elision, "1 line kept");
+		assert.equal(result.inputTokens, 6);
+		assert.equal(result.outputTokens, 4);
+		assert.equal(result.cached, true);
+	} finally {
+		if (previousMeatBin === undefined) delete process.env.MEAT_BIN;
+		else process.env.MEAT_BIN = previousMeatBin;
+	}
+});
+
+test("public API rejects conflicting input modes before starting meat", async () => {
+	await assert.rejects(
+		apiModule.abridgeWithActiveModel({}, { cwd: root, target: "HEAD", diff: "diff" }),
+		/mutually exclusive/,
+	);
 });
 
 test("client disconnect aborts the in-flight provider request", async () => {
