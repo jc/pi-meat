@@ -1,6 +1,6 @@
 {
   "name": "pi-meat",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "pi extension + CLI that abridges code diffs into reading diffs — review agent-written code at the concept level, not the line level",
   "type": "module",
   "exports": {
