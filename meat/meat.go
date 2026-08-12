@@ -37,7 +37,7 @@ const defaultMaxTurns = 24
 
 // defaultBudget bounds total wall-clock time for one agent run (the whole
 // diff, or one chunk of a split diff) so a stuck run can't hang forever.
-const defaultBudget = 4 * time.Minute
+const defaultBudget = 10 * time.Minute
 
 // abridgeBudget is a variable so deadline/fallback behavior can be tested
 // without waiting for the production budget.
